@@ -2,10 +2,14 @@
 from __future__ import unicode_literals
 
 from collections import defaultdict
+from datetime import datetime
 from itertools import chain
 import socket
 
 # Import third party libs
+from pathlib import Path
+from typing import Union
+
 from librouteros import connect
 from librouteros.exceptions import TrapError
 from librouteros.exceptions import FatalError
@@ -23,9 +27,12 @@ import napalm.base.utils.string_parsers
 import napalm.base.constants as C
 from napalm.base.helpers import ip as cast_ip
 from napalm.base.helpers import mac as cast_mac
-from napalm.base.exceptions import ConnectionException
+from napalm.base.exceptions import ConnectionException, CommandErrorException
 
 # Import local modules
+from routeros_diff import RouterOSConfig
+
+from napalm_ros.ssh_client import SshClient
 from napalm_ros.utils import to_seconds
 from napalm_ros.utils import iface_addresses
 from napalm_ros.query import (
@@ -50,6 +57,19 @@ class ROSDriver(NetworkDriver):
         self.optional_args = optional_args or dict()
         self.port = self.optional_args.get('port', 8728)
         self.api = None
+
+        private_ssh_key = optional_args.get('private_key_file')
+        if private_ssh_key:
+            private_ssh_key = Path(private_ssh_key)
+            assert private_ssh_key.exists(), f"Private key file not found: {private_ssh_key}"
+
+        self.ssh_client = SshClient(
+            host=hostname,
+            username=username,
+            private_key=private_ssh_key,
+            password=password,
+            timeout=self.timeout,
+        )
 
     def close(self):
         self.api.close()
@@ -463,6 +483,70 @@ class ROSDriver(NetworkDriver):
             })
 
         return dict(success=ping_results)
+
+    def get_config(self, retrieve="all", full=False, sanitized=False):
+        # TODO: Implement 'sanitized' arg
+        if full:
+            cmd = "/export verbose"
+        else:
+            cmd = "/export"
+
+        with self.ssh_client:
+            stdin, stdout, stderr, status = self.ssh_client.exec(cmd)
+            if status != 0:
+                error = stderr.read() or stdout.read()
+                raise CommandErrorException(error.decode("utf8")[:150])
+            return dict(
+                running=stdout.read().decode("utf8")
+            )
+
+    def load_replace_candidate(self, filename=None, config: Union[str, RouterOSConfig] = None, current_config: Union[str, RouterOSConfig] = None):
+        if not filename and not config:
+            raise ValueError("filename or config must be specified")
+
+        if filename:
+            config = Path(filename).read_text()
+
+        if not current_config:
+            # No current config, so fetch it from the router
+            current_config = RouterOSConfig.parse(self.get_config()['running'])
+        elif isinstance(current_config, str):
+            # Current config passed in as a string, so parse it
+            current_config = RouterOSConfig.parse(current_config)
+
+        if isinstance(config, str):
+            # Destination config passed in as a string, so parse it
+            config = RouterOSConfig.parse(config)
+
+        # Create the diff which we will need to apply to the router
+        diff = config.diff(current_config)
+
+        if not diff.sections:
+            # Nothing to do, so stop here
+            return
+
+        file_name = f"script-{datetime.now().isoformat()}.rsc"
+        script = str(diff)
+        # Remove the script after a successful run
+        script += f'\n/file remove "{file_name}"'
+        # Print success so we known everything worked
+        script += "\n:put SUCCESS"
+
+        with self.ssh_client:
+            self.ssh_client.write_file(file_name, script.encode("utf8"))
+            # Execute script
+            stdin, stdout, stderr, exit_code = self.ssh_client.exec(f'/import "{file_name}"')
+            stderr = stderr.read()
+            stdout = stdout.read()
+            success = b"SUCCESS" in stdout
+
+            # We are currently unable to get the error message returned by the script. The reason
+            # for this is unclear, and may be caused by a miss-use of Paramiko. We should be able
+            # to get the error because the error is shown when using an interactive SSH client.
+            if not success:
+                raise CommandErrorException(
+                    f"Error while executing script. File remains on the router in file {file_name}"
+                )
 
 
 def find_rows(rows, key, value):
