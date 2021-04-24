@@ -523,7 +523,6 @@ class ROSDriver(NetworkDriver):
             config = RouterOSConfig.parse(config)
 
         # Create the diff which we will need to apply to the router
-        breakpoint()
         diff = config.diff(old=current_config, old_verbose=current_config_verbose)
 
         if not diff.sections:
