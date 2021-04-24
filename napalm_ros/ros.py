@@ -500,7 +500,7 @@ class ROSDriver(NetworkDriver):
                 running=stdout.read().decode("utf8")
             )
 
-    def load_replace_candidate(self, filename=None, config: Union[str, RouterOSConfig] = None, current_config: Union[str, RouterOSConfig] = None):
+    def load_replace_candidate(self, filename=None, config: Union[str, RouterOSConfig] = None, current_config: Union[str, RouterOSConfig] = None, current_config_verbose: Union[str, RouterOSConfig] = None):
         if not filename and not config:
             raise ValueError("filename or config must be specified")
 
@@ -514,12 +514,17 @@ class ROSDriver(NetworkDriver):
             # Current config passed in as a string, so parse it
             current_config = RouterOSConfig.parse(current_config)
 
+        if isinstance(current_config_verbose, str):
+            # Verbose current config passed in as a string, so parse it
+            current_config_verbose = RouterOSConfig.parse(current_config_verbose)
+
         if isinstance(config, str):
             # Destination config passed in as a string, so parse it
             config = RouterOSConfig.parse(config)
 
         # Create the diff which we will need to apply to the router
-        diff = config.diff(current_config)
+        breakpoint()
+        diff = config.diff(old=current_config, old_verbose=current_config_verbose)
 
         if not diff.sections:
             # Nothing to do, so stop here
